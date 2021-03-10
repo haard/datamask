@@ -7,20 +7,23 @@ from collections import defaultdict
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from threading import Lock
 
 logging.basicConfig()
 LOG = logging.getLogger(__name__)
 FAKER = faker.Faker()
 SERIALS = {}
+SERIAL_LOCK = Lock()
 
 
 def serial(name, seed=0):
-    if not name in SERIALS:
+    if name not in SERIALS:
         SERIALS[name] = seed
 
     def cap(_):
-        SERIALS[name] += 1
-        return SERIALS[name]
+        with SERIAL_LOCK:
+            SERIALS[name] += 1
+            return SERIALS[name]
 
     return cap
 
@@ -89,6 +92,7 @@ def mask_row(row, mappers):
 
 
 def mask_pii(table, mappers, dsn):
+    # TODO: use SET CONSTRAINTS ALL DEFERRED if possible
     print(f"Executing {table}")
     conn = psycopg2.connect(dsn)
     read_cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
