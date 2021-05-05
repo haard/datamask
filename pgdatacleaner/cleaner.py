@@ -135,6 +135,27 @@ def mask_pii(table, mappers, dsn):
     LOG.info(f"{table} commited")
 
 
+def clean(executors: int, filename: str, dburl: str):
+
+    executor = ThreadPoolExecutor(max_workers=executors)
+    tasks = []
+    for table, mappers in get_piis(filename).items():
+        if mappers:
+            LOG.info(f"{table}:  masking {', '.join(mappers.keys())}")
+            tasks.append(executor.submit(mask_pii, table, mappers, dburl))
+        else:
+            LOG.debug(f"{table}: not masking")
+
+    completed = 0
+    taskcount = len(tasks)
+    LOG.debug(f"{taskcount} tasks submitted")
+    for task in tasks:
+        task.result()
+        completed += 1
+        LOG.debug(f"{completed}/{taskcount}")
+    LOG.info("Done")
+
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -149,24 +170,7 @@ def main():
     )
     parser.add_argument("-e", "--executors", type=int, default=2)
     args = parser.parse_args()
-    executor = ThreadPoolExecutor(max_workers=args.executors)
-    tasks = []
-    for table, mappers in get_piis(args.filename).items():
-        if mappers:
-            LOG.info(f"{table}:  masking {', '.join(mappers.keys())}")
-            tasks.append(executor.submit(mask_pii, table, mappers, args.dburl))
-        else:
-            LOG.debug(f"{table}: not masking")
-
-    completed = 0
-    taskcount = len(tasks)
-    LOG.debug(f"{taskcount} tasks submitted")
-    for task in tasks:
-        task.result()
-        completed += 1
-        LOG.debug(f"{completed}/{taskcount}")
-    LOG.info("Done")
-
+    clean(executors=args.executors, filename=args.filename, dburl=args.dburl)
 
 if __name__ == "__main__":
     main()

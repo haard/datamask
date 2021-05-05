@@ -9,7 +9,7 @@ except:  # Just don't break if we're running this some funny way
 
 setup(
     name="pgdatacleaner",
-    version="1.0a3",
+    version="1.0a4",
     description="Data cleaning/masking for PostgreSQL databases",
     long_description=longdesc,
     long_description_content_type='text/markdown',
