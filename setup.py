@@ -3,7 +3,7 @@
 from distutils.core import setup
 
 try:
-    longdesc = open('README.md', 'rt').read()
+    longdesc = open("README.md", "rt").read()
 except:  # Just don't break if we're running this some funny way
     longdesc = None
 
@@ -23,4 +23,9 @@ setup(
         ]
     },
     install_requires=["psycopg2-binary"],
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3.7",
+    ],
 )
