@@ -37,7 +37,7 @@ def get_mapper(table_schema, table_name, column_name, data_type, pii_type, **_):
         c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
         return "".join((random.choice(c) for _ in range(15)))
 
-    # Todod: args and context
+    # Somehow still TODO: args and context
     fakers = {
         "person_firstname": lambda _: FAKER.first_name(),
         "person_familyname": lambda _: FAKER.last_name(),
@@ -69,7 +69,7 @@ def get_mapper(table_schema, table_name, column_name, data_type, pii_type, **_):
 
 
 def get_piis(source_file_csv: str):
-    source = csv.DictReader(open(source_file_csv), delimiter=",")  # TODO: args
+    source = csv.DictReader(open(source_file_csv), delimiter=";")  # TODO: args
     tables: dict = defaultdict(dict)
     for line in source:
         if line["pii"] == "yes":
@@ -107,6 +107,7 @@ def mask_pii(table, mappers, dsn):
     pks = [row[0] for row in read_cursor]
     read_cursor.execute(f"SELECT * FROM {table}")
     write_cursor = conn.cursor()
+    write_cursor.execute('SET CONSTRAINTS ALL DEFERRED')
     for row in read_cursor:
         new_row = mask_row(row, mappers)
         where = " AND ".join((f"{colname}=%s") for colname in pks)
