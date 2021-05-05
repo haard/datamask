@@ -1,19 +1,31 @@
+import argparse
+import csv
+import logging
+import random
+import textwrap
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
+
+import faker
 import psycopg2
 import psycopg2.extras
-import faker
-import csv
-import random
-from collections import defaultdict
-import argparse
-from concurrent.futures import ThreadPoolExecutor
-import logging
-from threading import Lock
 
 logging.basicConfig()
 LOG = logging.getLogger(__name__)
 FAKER = faker.Faker()
 SERIALS = {}
 SERIAL_LOCK = Lock()
+
+
+def tla(*_):
+    c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
+    return "".join((random.choice(c) for _ in range(5)))
+
+
+def slug(_):
+    c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
+    return "".join((random.choice(c) for _ in range(15)))
 
 
 def serial(name, seed=0):
@@ -28,43 +40,41 @@ def serial(name, seed=0):
     return cap
 
 
+# Somehow still TODO: args and context
+FAKERS = {
+    "person_firstname": lambda _: FAKER.first_name(),
+    "person_familyname": lambda _: FAKER.last_name(),
+    "person_name": lambda _: FAKER.name(),
+    "tla": tla,
+    "business_name": lambda _: FAKER.company(),
+    "slug": lambda _: FAKER.slug(),
+    "null": lambda _: None,
+    # TODO: args for bs etc? maxlen!
+    "text_short": lambda _: FAKER.sentence(),
+    "text": lambda _: FAKER.paragraph(),
+    "email": lambda _: FAKER.email(domain="example.com"),  # TODO
+    "user_agent": lambda _: FAKER.user_agent(),
+    "url": lambda _: FAKER.uri(),
+    "url_image": lambda _: FAKER.image_url(),
+    "phonenumber": lambda _: FAKER.msisdn()[:11],
+    "address": lambda _: FAKER.address(),
+    "city": lambda _: FAKER.city(),
+    "zipcode": lambda _: FAKER.postcode(),
+    "filename": lambda _: FAKER.file_name(),
+    "inet_addr": lambda _: FAKER.ipv4(),  # TODO private?
+    "username": slug,
+    "int": lambda _: random.randint(0, 300000000),  # TODO: arg+default
+    "password": slug,
+    # TODO: arg+default instead?
+    "serial": None,
+}
+
+
 def get_mapper(table_schema, table_name, column_name, data_type, pii_type, **_):
-    def tla(*_):
-        c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
-        return "".join((random.choice(c) for _ in range(5)))
-
-    def slug(_):
-        c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
-        return "".join((random.choice(c) for _ in range(15)))
-
-    # Somehow still TODO: args and context
-    fakers = {
-        "person_firstname": lambda _: FAKER.first_name(),
-        "person_familyname": lambda _: FAKER.last_name(),
-        "person_name": lambda _: FAKER.name(),
-        "tla": tla,
-        "business_name": lambda _: FAKER.company(),
-        "slug": lambda _: FAKER.slug(),
-        "null": lambda _: None,
-        # TODO: args for bs etc? maxlen!
-        "text_short": lambda _: FAKER.sentence(),
-        "text": lambda _: FAKER.paragraph(),
-        "email": lambda _: FAKER.email(domain="example.com"),  # TODO
-        "user_agent": lambda _: FAKER.user_agent(),
-        "url": lambda _: FAKER.uri(),
-        "url_image": lambda _: FAKER.image_url(),
-        "phonenumber": lambda _: FAKER.msisdn()[:11],
-        "address": lambda _: FAKER.address(),
-        "city": lambda _: FAKER.city(),
-        "zipcode": lambda _: FAKER.postcode(),
-        "filename": lambda _: FAKER.file_name(),
-        "inet_addr": lambda _: FAKER.ipv4(),  # TODO private?
-        "username": slug,
-        "int": lambda _: random.randint(0, 300000000),  # TODO: arg+default
-        "password": slug,
-        # TODO: arg+default instead
-        "serial": serial(f"{table_schema}.{table_name}.{column_name}", 200000000),
-    }
+    fakers = FAKERS.copy()
+    fakers["serial"] = (
+        serial(f"{table_schema}.{table_name}.{column_name}", 200000000),
+    )  # reset?
     return fakers[pii_type]
 
 
@@ -92,7 +102,6 @@ def mask_row(row, mappers):
 
 
 def mask_pii(table, mappers, dsn):
-    # TODO: use SET CONSTRAINTS ALL DEFERRED if possible
     print(f"Executing {table}")
     conn = psycopg2.connect(dsn)
     read_cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -107,7 +116,7 @@ def mask_pii(table, mappers, dsn):
     pks = [row[0] for row in read_cursor]
     read_cursor.execute(f"SELECT * FROM {table}")
     write_cursor = conn.cursor()
-    write_cursor.execute('SET CONSTRAINTS ALL DEFERRED')
+    write_cursor.execute("SET CONSTRAINTS ALL DEFERRED")
     for row in read_cursor:
         new_row = mask_row(row, mappers)
         where = " AND ".join((f"{colname}=%s") for colname in pks)
@@ -128,7 +137,10 @@ def mask_pii(table, mappers, dsn):
 
 def main():
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        epilog=f"Available pii_types / fakes: {', '.join((key for key in sorted(FAKERS.keys())))}"
+    )
+
     parser.add_argument(
         "-d", "--dburl", type=str,
     )
