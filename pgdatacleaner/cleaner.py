@@ -71,11 +71,10 @@ FAKERS = {
 
 
 def get_mapper(table_schema, table_name, column_name, data_type, pii_type, **_):
-    fakers = FAKERS.copy()
-    fakers["serial"] = (
-        serial(f"{table_schema}.{table_name}.{column_name}", 200000000),
-    )  # reset?
-    return fakers[pii_type]
+    if pii_type == 'serial':
+        return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)
+    else:
+        return FAKERS[pii_type]
 
 
 def get_piis(source_file_csv: str):
@@ -97,7 +96,11 @@ def get_piis(source_file_csv: str):
 def mask_row(row, mappers):
     new_row = {}
     for column_name, (line, mapper) in mappers.items():
-        new_row[line["column_name"]] = mapper(line)
+        try:
+            new_row[line["column_name"]] = mapper(line)
+        except:
+            print('Failed on {line} with: {mapper(line)}')
+            raise
     return new_row
 
 
