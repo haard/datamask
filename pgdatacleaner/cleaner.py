@@ -29,7 +29,7 @@ def serial(name, seed=0):
     if name not in SERIALS:
         SERIALS[name] = seed
 
-    def cap(_):
+    def cap(*_):
         with SERIAL_LOCK:
             SERIALS[name] += 1
             return SERIALS[name]
@@ -45,7 +45,7 @@ def random_slug(*_):
 
 def slug(args):
 
-    if not args:
+    if not args or not args[0]:
         return random_slug
 
     def slug_with_args(field, row):
@@ -84,7 +84,10 @@ class RowMapper:
         count = len(remaining)
         while remaining:
             for col, (spec, mapper) in remaining.items():
-                depends = [d for d in spec["depends"].split(",") if d]
+                if spec["depends"]:
+                    depends = [d for d in spec["depends"].split(",") if d]
+                else:
+                    depends = None
                 if not depends or all([dep in added for dep in depends]):
                     self.mappers.append(FieldMapSpec(col, spec, mapper))
                     added.add(col)
@@ -95,7 +98,11 @@ class RowMapper:
 
     def mask(self, row):
         for mapspec in self.mappers:
-            row[mapspec.col] = mapspec.mapper(row[mapspec.col], row)
+            try:
+                row[mapspec.col] = mapspec.mapper(row[mapspec.col], row)
+            except Exception:
+                print(f"Failed at col {mapspec.col} using mapper {mapspec.mapper}")
+                raise
         return row
 
 
@@ -103,13 +110,16 @@ FAKERS = {
     "person_firstname": generic(FAKER.first_name, "A first name"),
     "person_familyname": generic(FAKER.last_name, " A family name"),
     "person_name": generic(FAKER.name),
-    "tla": tla,
+    "tla": generic(tla),
     "business_name": generic(FAKER.company),
     "slug": slug,
     "null": generic(lambda: None, "Returns NULL"),
     "text_short": generic(FAKER.sentence),
     "text": generic(FAKER.paragraph),
-    "email": lambda _: FAKER.email(domain="example.com"),
+    "email": generic(
+        lambda *_: FAKER.email(domain="example.com"),
+        doc="Returns an @example.com email address",
+    ),
     "user_agent": generic(FAKER.user_agent),
     "url": generic(FAKER.uri),
     "url_image": generic(FAKER.image_url),
@@ -128,7 +138,7 @@ FAKERS = {
 
 
 def get_mapper(
-        table_schema, table_name, column_name, data_type, pii_type, args, depends, **_
+    table_schema, table_name, column_name, data_type, pii_type, args, depends, **_
 ):
     if pii_type == "serial":
         return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)
@@ -140,7 +150,6 @@ def get_piis(source_csv):
     source = csv.DictReader(source_csv, delimiter=";")
     tables: dict = defaultdict(dict)
     for line in source:
-        print(line)
         if line["pii"] == "yes":
             try:
                 mapper = get_mapper(**line)
@@ -154,10 +163,15 @@ def get_piis(source_csv):
 
 
 def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
-    print(f"Executing {table}")
+
     row_mapper = RowMapper(pii_spec)
+    if not row_mapper.mappers:
+        print(f"Skipping {table}")
+        return
+    print(f"Executing {table}")
     if dsn.startswith("postgres"):
         import psycopg2
+        import psycopg2.extras
 
         conn = psycopg2.connect(dsn)
         read_cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -171,7 +185,7 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
         )
         write_cursor = conn.cursor()
         write_cursor.execute("SET CONSTRAINTS ALL DEFERRED")
-        p = "%"
+        p = "%s"
     else:
         import sqlite3
 
@@ -187,14 +201,20 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
     if keepers is None:
         read_cursor.execute(f"SELECT * FROM {table}")
     else:
+        print(f"Skipping {len(keepers)} records for {table}")
         read_cursor.execute(
-            f"SELECT * FROM {table} WHERE {pks[0]} NOT IN ({p})", keepers
+            f"SELECT * FROM {table} WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})",
+            keepers,
         )
     where = " AND ".join((f"{colname}={p}") for colname in pks)
     for row in read_cursor:
+        try:
 
-        new_row = row_mapper.mask({k: row[k] for k in row.keys()})
-        replacements = ",".join((f"{colname}={p}") for colname in new_row.keys())
+            new_row = row_mapper.mask({k: row[k] for k in row.keys()})
+        except Exception as exe:
+            print(f"{table} Failure ({exe}):\n\t{row}\n\t{pii_spec}")
+            raise
+        replacements = ",".join((f'"{colname}"={p}') for colname in new_row.keys())
         new_values = [new_row[k] for k in new_row.keys()]
         old_values = [row[k] for k in pks]
         sql = f"UPDATE {table} SET {replacements} WHERE {where}"
