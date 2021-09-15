@@ -136,11 +136,11 @@ def get_mapper(
         return FAKERS[pii_type](args.split(","))
 
 
-def get_piis(source_csv: str):
+def get_piis(source_csv):
     source = csv.DictReader(source_csv, delimiter=";")
     tables: dict = defaultdict(dict)
     for line in source:
-
+        print(line)
         if line["pii"] == "yes":
             try:
                 mapper = get_mapper(**line)
@@ -153,9 +153,9 @@ def get_piis(source_csv: str):
     return tables
 
 
-def mask_pii(table: str, pii_spec, dsn, keepers):
+def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
     print(f"Executing {table}")
-    row_mapper = RowMapper(pii_spec[table])
+    row_mapper = RowMapper(pii_spec)
     if dsn.startswith("postgres"):
         import psycopg2
 
@@ -179,7 +179,7 @@ def mask_pii(table: str, pii_spec, dsn, keepers):
         conn.row_factory = sqlite3.Row
         read_cursor = conn.cursor()
         read_cursor.execute(
-            f"SELECT name from pragma_table_info(?) WHERE pk=1", (table.split(".")[1],)
+            "SELECT name from pragma_table_info(?) WHERE pk=1", (table.split(".")[1],)
         )
         write_cursor = conn.cursor()
         p = "?"
@@ -190,10 +190,10 @@ def mask_pii(table: str, pii_spec, dsn, keepers):
         read_cursor.execute(
             f"SELECT * FROM {table} WHERE {pks[0]} NOT IN ({p})", keepers
         )
+    where = " AND ".join((f"{colname}={p}") for colname in pks)
     for row in read_cursor:
 
         new_row = row_mapper.mask({k: row[k] for k in row.keys()})
-        where = " AND ".join((f"{colname}={p}") for colname in pks)
         replacements = ",".join((f"{colname}={p}") for colname in new_row.keys())
         new_values = [new_row[k] for k in new_row.keys()]
         old_values = [row[k] for k in pks]
@@ -205,27 +205,46 @@ def mask_pii(table: str, pii_spec, dsn, keepers):
         except Exception:
             LOG.exception(f"Table: {table}\n SQL: {sql}")
             raise
+    if fixed:
+        for pk, kv in fixed.items():
+            update_sql = []
+            vals = []
+            for col, val in kv.items():
+                update_sql.append(f"{col}={p}")
+                vals.append(val)
+            write_cursor.execute(
+                f"UPDATE {table} SET {','.join(update_sql)} WHERE {where}", vals + [pk]
+            )
     conn.commit()
     LOG.info(f"{table} commited")
 
 
-def clean(executors: int, filename: str, dburl: str, keep_filename: str):
+def clean(
+    executors: int, filename: str, dburl: str, keep_filename: str, fixed_filename: str
+):
     if not keep_filename:
         keep = {}
     else:
         keep = json.load(open(keep_filename))
+    if not fixed_filename:
+        fixed = {}
+    else:
+        fixed = json.load(open(fixed_filename))
     executor = ThreadPoolExecutor(max_workers=executors)
     tasks = []
-    source_csv = open(filename).read()
+    source_csv = open(filename)
     for table, pii_spec in get_piis(source_csv).items():
 
-        if mappers:
-            LOG.info(f"{table}:  masking {', '.join(mappers.keys())}")
-            tasks.append(
-                executor.submit(mask_pii, table, pii_spec, dburl, keep.get(table, None))
+        tasks.append(
+            executor.submit(
+                mask_pii,
+                table,
+                pii_spec,
+                dburl,
+                keep.get(table, None),
+                fixed.get(table, None),
             )
-        else:
-            LOG.debug(f"{table}: not masking")
+        )
 
     completed = 0
     taskcount = len(tasks)
@@ -239,7 +258,7 @@ def clean(executors: int, filename: str, dburl: str, keep_filename: str):
 
 def print_fakers():
     print(
-        f"Available pii_types / fakes: \n"
+        "Available pii_types / fakes: \n"
         + "\n".join(
             [
                 f"  {key}: {FAKERS[key].__doc__ or 'No doc =('}"
@@ -285,6 +304,7 @@ def main():
             filename=args.filename,
             dburl=args.dburl,
             keep_filename=args.keep,
+            fixed_filename=args.fixed,
         )
 
 
