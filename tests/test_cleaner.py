@@ -6,7 +6,7 @@ from io import StringIO
 import pytest
 import slugify
 
-from pgdatacleaner import cleaner
+from datamask import cleaner
 
 CSV = """table_schema;table_name;column_name;data_type;pii;pii_type;depends;args
 main;t1;c1;serial;no;;;

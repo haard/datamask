@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "pgdatacleaner"
-version = "1.1.0a16"
-description = "Data cleaning/masking for PostgreSQL databases"
+name = "datamask"
+version = "1.0.0"
+description = "Data PII cleaning/masking for PostgreSQL databases"
 authors = ["Fredrik Håård <fredrik@metallapan.se>"]
 license = "MIT License"
 
@@ -22,5 +22,5 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
-dataclean = 'pgdatacleaner.cleaner:main'
-datadict = 'pgdatacleaner.datadict:main'
+datamask = 'datamask.cleaner:main'
+datadict = 'datamask.datadict:main'
