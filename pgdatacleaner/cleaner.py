@@ -128,7 +128,7 @@ FAKERS = {
 
 
 def get_mapper(
-    table_schema, table_name, column_name, data_type, pii_type, depends, args, **_
+        table_schema, table_name, column_name, data_type, pii_type, args, depends, **_
 ):
     if pii_type == "serial":
         return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)

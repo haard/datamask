@@ -24,7 +24,7 @@ def write_datadict(schema, destfile):
 
     writer = csv.DictWriter(
         destfile,
-        "table_schema;table_name;column_name;data_type;pii;pii_type;args".split(";"),
+        "table_schema;table_name;column_name;data_type;pii;pii_type;args;depends".split(";"),
         delimiter=";",
     )
     writer.writeheader()
