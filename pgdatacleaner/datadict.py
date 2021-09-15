@@ -34,8 +34,8 @@ def write_datadict(schema, destfile):
 
 def merge(original, new, default_pii=False):
     keyset = "table_schema", "table_name", "column_name"
-    original_kv = {tuple([row[k] for k in keyset]): row for row in original}
-    new_kv = {tuple([row[k] for k in keyset]): row for row in new}
+    original_kv = {tuple(row[k] for k in keyset): row for row in original}
+    new_kv = {tuple(row[k] for k in keyset): row for row in new}
     merged = dict(original_kv.items())
     for key in original_kv.keys():
         if key not in new_kv:

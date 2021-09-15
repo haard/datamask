@@ -3,7 +3,7 @@
 from setuptools import setup
 
 try:
-    longdesc = open("README.md", "rt").read()
+    longdesc = open("README.md").read()
 except:  # Just don't break if we're running this some funny way
     longdesc = None
 
@@ -12,7 +12,7 @@ setup(
     version="1.0a4",
     description="Data cleaning/masking for PostgreSQL databases",
     long_description=longdesc,
-    long_description_content_type='text/markdown',
+    long_description_content_type="text/markdown",
     author="Fredrik Håård",
     author_email="fredrik@metallapan.se",
     url="https://github.com/haard/pgdatacleaner",
