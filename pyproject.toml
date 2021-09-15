@@ -16,6 +16,8 @@ tox = "^3.24.3"
 tox-poetry = "^0.4.1"
 pytest = "^6.2.5"
 shed = "^0.3.10"
+keyring = "^23.2.1"
+sagecipher = "^0.7.5"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
