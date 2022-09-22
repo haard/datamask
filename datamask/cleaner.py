@@ -55,6 +55,13 @@ def slug(args):
     return slug_with_args
 
 
+def static_str(args):
+
+    def str_from_arg(field, row):
+        return args[0]  #json.loads(args[0])
+    return str_from_arg
+
+
 def generic(fn, doc=None):
     """Helper for generic faker functions that take no arguments"""
 
@@ -99,10 +106,15 @@ class RowMapper:
     def mask(self, row):
         for mapspec in self.mappers:
             try:
-                row[mapspec.col] = mapspec.mapper(row[mapspec.col], row)
-            except Exception:
-                print(f"Failed at col {mapspec.col} using mapper {mapspec.mapper}")
+                data = mapspec.mapper(row[mapspec.col], row)
+                row[mapspec.col] = data
+            except Exception as exe:
+                print(f"Failed at col {mapspec.col} using mapper {mapspec.mapper} with {exe}")
                 raise
+        for i, col in enumerate(row):
+            if isinstance(col, (list, dict)):
+                row[i] = json.dumps(row[i])
+
         return row
 
 
@@ -134,6 +146,7 @@ FAKERS = {
     "password": slug,
     # TODO: arg+default instead?
     "serial": generic(lambda: None, doc="Imitate a serial"),
+    "static_str": static_str
 }
 
 
@@ -223,7 +236,7 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
             write_cursor.execute(sql, values)
             assert write_cursor.rowcount == 1
         except Exception:
-            LOG.exception(f"Table: {table}\n SQL: {sql}")
+            LOG.exception(f"Table: {table}\n SQL: {sql} \n Values: {values}\n Spec: {pii_spec}")
             raise
     if fixed:
         for pk, kv in fixed.items():
