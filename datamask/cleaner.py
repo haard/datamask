@@ -55,15 +55,14 @@ def slug(*, args, **_):
     return slug_with_args
 
 
-
-
 def generic(fn, doc=None):
     """Helper for generic faker functions that take no arguments"""
     vals = set()
+
     def fake_maker(**kwargs):
         @wraps(fn)
         def faker(field, row):
-             return fn()
+            return fn()
 
         return faker
 
@@ -109,13 +108,16 @@ class RowMapper:
                 data = mapspec.mapper(row[mapspec.col], row)
                 row[mapspec.col] = data
             except Exception as exe:
-                print(f"Failed at col {mapspec.col} using mapper {mapspec.mapper} with {exe}")
+                print(
+                    f"Failed at col {mapspec.col} using mapper {mapspec.mapper} with {exe}"
+                )
                 raise
         for i, col in enumerate(row):
             if isinstance(col, (list, dict)):
                 row[i] = json.dumps(row[i])
 
         return row
+
 
 class NativeFaker:
     def __init__(self, schema, table, column, args):
@@ -130,15 +132,18 @@ class NativeFaker:
 
 class EmailFaker(NativeFaker):
 
-    name = 'Native email'
+    name = "Native email"
+
     def command(self, where):
         return f"""
         UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(CAST({self.args[0]} AS TEXT), 'email@example.com')  {where}
         """
 
+
 class StaticStringFaker(NativeFaker):
 
-    name = 'Native static sting'
+    name = "Native static sting"
+
     def command(self, where):
         return f"""
         UPDATE {self.schema}.{self.table} SET {self.column}='{self.args[0]}' {where}
@@ -170,7 +175,7 @@ FAKERS = {
     "password": slug,
     # TODO: arg+default instead?
     "serial": generic(lambda: None, doc="Imitate a serial"),
-    "static_str": StaticStringFaker
+    "static_str": StaticStringFaker,
 }
 
 
@@ -180,7 +185,12 @@ def get_mapper(
     if pii_type == "serial":
         return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)
     else:
-        return FAKERS[pii_type](schema=table_schema, table=table_name, column=column_name, args=args.split(","))
+        return FAKERS[pii_type](
+            schema=table_schema,
+            table=table_name,
+            column=column_name,
+            args=args.split(","),
+        )
 
 
 def get_piis(source_csv):
@@ -241,9 +251,8 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
             where = f"WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})"
             write_cursor.execute(native.command(where), keepers)
         else:
-            write_cursor.execute(native.command(''))
-        
-        
+            write_cursor.execute(native.command(""))
+
     if keepers is None:
         read_cursor.execute(f"SELECT * FROM {table}")
     else:
@@ -269,7 +278,9 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
             write_cursor.execute(sql, values)
             assert write_cursor.rowcount == 1
         except Exception:
-            LOG.exception(f"Table: {table}\n SQL: {sql} \n Values: {values}\n Spec: {pii_spec}")
+            LOG.exception(
+                f"Table: {table}\n SQL: {sql} \n Values: {values}\n Spec: {pii_spec}"
+            )
             raise
     if fixed:
         for pk, kv in fixed.items():
