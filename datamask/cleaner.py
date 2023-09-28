@@ -18,7 +18,7 @@ SERIALS = {}
 SERIAL_LOCK = Lock()
 
 
-def tla(*_):
+def tla():
     """Create a random abbreviation-looking string"""
     c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
     return "".join(random.choice(c) for _ in range(5))
@@ -43,7 +43,7 @@ def random_slug(*_):
     return "".join(random.choice(c) for _ in range(15))
 
 
-def slug(args):
+def slug(*, args, **_):
 
     if not args or not args[0]:
         return random_slug
@@ -55,20 +55,15 @@ def slug(args):
     return slug_with_args
 
 
-def static_str(args):
-
-    def str_from_arg(field, row):
-        return args[0]  #json.loads(args[0])
-    return str_from_arg
 
 
 def generic(fn, doc=None):
     """Helper for generic faker functions that take no arguments"""
-
-    def fake_maker(*args):
+    vals = set()
+    def fake_maker(**kwargs):
         @wraps(fn)
         def faker(field, row):
-            return fn()
+             return fn()
 
         return faker
 
@@ -83,14 +78,19 @@ FieldMapSpec = namedtuple("FieldMapSpec", "col spec mapper")
 
 
 class RowMapper:
-    def __init__(self, piis_for_table):
+    def __init__(self, table, piis_for_table):
         """Sort column mappers according to dependencies"""
         self.mappers = []
+        self.natives = []
         remaining = dict(piis_for_table.items())
         added = set()
         count = len(remaining)
         while remaining:
             for col, (spec, mapper) in remaining.items():
+                if isinstance(mapper, NativeFaker):
+                    self.natives.append(mapper)
+                    added.add(col)
+                    continue
                 if spec["depends"]:
                     depends = [d for d in spec["depends"].split(",") if d]
                 else:
@@ -117,6 +117,33 @@ class RowMapper:
 
         return row
 
+class NativeFaker:
+    def __init__(self, schema, table, column, args):
+        self.schema = schema
+        self.table = table
+        self.column = column
+        self.args = args
+
+    def __str__(self):
+        return f"{self.name} for {self.table}:{self.column}"
+
+
+class EmailFaker(NativeFaker):
+
+    name = 'Native email'
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(CAST({self.args[0]} AS TEXT), 'email@example.com')  {where}
+        """
+
+class StaticStringFaker(NativeFaker):
+
+    name = 'Native static sting'
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}='{self.args[0]}' {where}
+        """
+
 
 FAKERS = {
     "person_firstname": generic(FAKER.first_name, "A first name"),
@@ -125,13 +152,10 @@ FAKERS = {
     "tla": generic(tla),
     "business_name": generic(FAKER.company),
     "slug": slug,
-    "null": generic(lambda: None, "Returns NULL"),
+    "null": generic(lambda **_: None, "Returns NULL"),
     "text_short": generic(FAKER.sentence),
     "text": generic(FAKER.paragraph),
-    "email": generic(
-        lambda *_: FAKER.email(domain="example.com"),
-        doc="Returns an @example.com email address",
-    ),
+    "email": EmailFaker,
     "user_agent": generic(FAKER.user_agent),
     "url": generic(FAKER.uri),
     "url_image": generic(FAKER.image_url),
@@ -142,11 +166,11 @@ FAKERS = {
     "filename": generic(FAKER.file_name),
     "inet_addr": generic(FAKER.ipv4),
     "username": slug,
-    "int": lambda _: random.randint(0, 300000000),  # TODO: arg+default
+    "int": lambda **_: random.randint(0, 300000000),  # TODO: arg+default
     "password": slug,
     # TODO: arg+default instead?
     "serial": generic(lambda: None, doc="Imitate a serial"),
-    "static_str": static_str
+    "static_str": StaticStringFaker
 }
 
 
@@ -156,7 +180,7 @@ def get_mapper(
     if pii_type == "serial":
         return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)
     else:
-        return FAKERS[pii_type](args.split(","))
+        return FAKERS[pii_type](schema=table_schema, table=table_name, column=column_name, args=args.split(","))
 
 
 def get_piis(source_csv):
@@ -177,8 +201,8 @@ def get_piis(source_csv):
 
 def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
 
-    row_mapper = RowMapper(pii_spec)
-    if not row_mapper.mappers:
+    row_mapper = RowMapper(table, pii_spec)
+    if not row_mapper.mappers and not row_mapper.natives:
         print(f"Skipping {table}")
         return
     print(f"Executing {table}")
@@ -211,6 +235,15 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
         write_cursor = conn.cursor()
         p = "?"
     pks = [row[0] for row in read_cursor]
+    for native in row_mapper.natives:
+        print(f"Executing {native}")
+        if keepers:
+            where = f"WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})"
+            write_cursor.execute(native.command(where), keepers)
+        else:
+            write_cursor.execute(native.command(''))
+        
+        
     if keepers is None:
         read_cursor.execute(f"SELECT * FROM {table}")
     else:
