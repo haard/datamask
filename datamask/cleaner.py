@@ -2,75 +2,14 @@ import argparse
 import csv
 import json
 import logging
-import random
+import sys
+
+import yaml
 from collections import defaultdict, namedtuple
 from concurrent.futures import ThreadPoolExecutor
-from functools import wraps
-from threading import Lock
-
-import faker
-from slugify import slugify
 
 logging.basicConfig()
 LOG = logging.getLogger(__name__)
-FAKER = faker.Faker()
-SERIALS = {}
-SERIAL_LOCK = Lock()
-
-
-def tla():
-    """Create a random abbreviation-looking string"""
-    c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
-    return "".join(random.choice(c) for _ in range(5))
-
-
-def serial(name, seed=0):
-    """Create a serial"""
-    if name not in SERIALS:
-        SERIALS[name] = seed
-
-    def cap(*_):
-        with SERIAL_LOCK:
-            SERIALS[name] += 1
-            return SERIALS[name]
-
-    return cap
-
-
-def random_slug(*_):
-    """Create a random slug"""
-    c = "QWERTYUIOPLKJHGFDSAMNBVCXZ"
-    return "".join(random.choice(c) for _ in range(15))
-
-
-def slug(*, args, **_):
-
-    if not args or not args[0]:
-        return random_slug
-
-    def slug_with_args(field, row):
-        """Create a slug from another named column on the same row"""
-        return slugify(row[args[0]])
-
-    return slug_with_args
-
-
-def generic(fn, doc=None):
-    """Helper for generic faker functions that take no arguments"""
-    vals = set()
-
-    def fake_maker(**kwargs):
-        @wraps(fn)
-        def faker(field, row):
-            return fn()
-
-        return faker
-
-    if doc is None:
-        fake_maker.__doc__ = fn.__doc__
-    else:
-        fake_maker.__doc__ = doc
-    return fake_maker
 
 
 FieldMapSpec = namedtuple("FieldMapSpec", "col spec mapper")
@@ -78,17 +17,22 @@ FieldMapSpec = namedtuple("FieldMapSpec", "col spec mapper")
 
 class RowMapper:
     def __init__(self, table, piis_for_table):
-        """Sort column mappers according to dependencies"""
+        """Sort column mappers according to dependencies (including native fakers)"""
         self.mappers = []
         self.natives = []
         remaining = dict(piis_for_table.items())
         added = set()
         count = len(remaining)
         while remaining:
-            for col, (spec, mapper) in remaining.items():
+            for col, (spec, mapper) in list(remaining.items()):
                 if isinstance(mapper, NativeFaker):
+                    # Check if this native has dependencies
+                    native_depends = getattr(mapper, "depends", None)
+                    if native_depends and native_depends not in added:
+                        continue  # Wait for dependency to be added first
                     self.natives.append(mapper)
                     added.add(col)
+                    del remaining[col]
                     continue
                 if spec["depends"]:
                     depends = [d for d in spec["depends"].split(",") if d]
@@ -97,9 +41,8 @@ class RowMapper:
                 if not depends or all([dep in added for dep in depends]):
                     self.mappers.append(FieldMapSpec(col, spec, mapper))
                     added.add(col)
-            for v in added:
-                del remaining[v]
-            assert len(remaining) < count
+                    del remaining[col]
+            assert len(remaining) < count, f"Circular dependency detected: {remaining.keys()}"
             count = len(remaining)
 
     def mask(self, row):
@@ -142,7 +85,7 @@ class EmailFaker(NativeFaker):
 
 class StaticStringFaker(NativeFaker):
 
-    name = "Native static sting"
+    name = "Native static string"
 
     def command(self, where):
         return f"""
@@ -150,31 +93,407 @@ class StaticStringFaker(NativeFaker):
         """
 
 
+class NullFaker(NativeFaker):
+
+    name = "Native null"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=NULL {where}
+        """
+
+
+class IntFaker(NativeFaker):
+
+    name = "Native int"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=FLOOR(RANDOM() * 300000000)::INT {where}
+        """
+
+
+class TlaFaker(NativeFaker):
+
+    name = "Native tla"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=UPPER(SUBSTRING(MD5(RANDOM()::TEXT), 1, 5)) {where}
+        """
+
+
+class ZipcodeFaker(NativeFaker):
+
+    name = "Native zipcode"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=LPAD(FLOOR(RANDOM() * 99999)::TEXT, 5, '0') {where}
+        """
+
+
+class InetAddrFaker(NativeFaker):
+
+    name = "Native inet_addr"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            FLOOR(RANDOM() * 256)::INT, '.',
+            FLOOR(RANDOM() * 256)::INT, '.',
+            FLOOR(RANDOM() * 256)::INT, '.',
+            FLOOR(RANDOM() * 256)::INT
+        ) {where}
+        """
+
+
+class PhoneNumberFaker(NativeFaker):
+
+    name = "Native phonenumber"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=LPAD(FLOOR(RANDOM() * 999999999999999)::TEXT, 15, '0') {where}
+        """
+
+
+# Data arrays for array-based fakers
+FIRST_NAMES = [
+    "James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda",
+    "William", "Elizabeth", "David", "Barbara", "Richard", "Susan", "Joseph", "Jessica",
+    "Thomas", "Sarah", "Charles", "Karen", "Emma", "Oliver", "Ava", "Noah", "Sophia",
+    "Liam", "Isabella", "Mason", "Mia", "Lucas", "Charlotte", "Ethan", "Amelia",
+]
+
+FAMILY_NAMES = [
+    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+    "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson",
+    "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson",
+    "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker",
+]
+
+CITIES = [
+    "New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "Philadelphia",
+    "San Antonio", "San Diego", "Dallas", "San Jose", "Austin", "Jacksonville",
+    "Fort Worth", "Columbus", "Charlotte", "Seattle", "Denver", "Boston", "Portland",
+    "Las Vegas", "Detroit", "Memphis", "Baltimore", "Milwaukee", "Albuquerque",
+]
+
+STREET_NAMES = [
+    "Main St", "Oak Ave", "Maple Dr", "Cedar Ln", "Pine Rd", "Elm St", "Washington Blvd",
+    "Park Ave", "Lake Dr", "Hill Rd", "River Rd", "Forest Ave", "Sunset Blvd", "Broadway",
+    "Highland Ave", "Valley Rd", "Spring St", "Church St", "Mill Rd", "School St",
+]
+
+BUSINESS_SUFFIXES = [
+    "Inc", "LLC", "Corp", "Co", "Ltd", "Group", "Solutions", "Services", "Industries",
+    "Enterprises", "Holdings", "Partners", "Associates", "International", "Systems",
+]
+
+BUSINESS_WORDS = [
+    "Acme", "Global", "Premier", "Advanced", "Dynamic", "Innovative", "Strategic",
+    "United", "Pacific", "Atlantic", "Summit", "Pioneer", "Apex", "Prime", "Elite",
+    "Core", "Next", "Future", "Smart", "Tech", "Digital", "Data", "Cloud", "Net",
+]
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15",
+    "Mozilla/5.0 (iPad; CPU OS 14_0 like Mac OS X) AppleWebKit/605.1.15",
+    "Mozilla/5.0 (Android 11; Mobile) AppleWebKit/537.36",
+]
+
+FILE_EXTENSIONS = ["pdf", "doc", "txt", "jpg", "png", "xlsx", "csv", "mp3", "mp4", "zip"]
+
+LOREM_WORDS = [
+    "lorem", "ipsum", "dolor", "sit", "amet", "consectetur", "adipiscing", "elit",
+    "sed", "do", "eiusmod", "tempor", "incididunt", "ut", "labore", "et", "dolore",
+    "magna", "aliqua", "enim", "ad", "minim", "veniam", "quis", "nostrud",
+    "exercitation", "ullamco", "laboris", "nisi", "aliquip", "ex", "ea", "commodo",
+    "consequat", "duis", "aute", "irure", "in", "reprehenderit", "voluptate",
+    "velit", "esse", "cillum", "fugiat", "nulla", "pariatur", "excepteur", "sint",
+    "occaecat", "cupidatat", "non", "proident", "sunt", "culpa", "qui", "officia",
+    "deserunt", "mollit", "anim", "id", "est", "laborum",
+]
+
+
+def _sql_array(items):
+    """Convert Python list to PostgreSQL ARRAY literal."""
+    escaped = [item.replace("'", "''") for item in items]
+    return "ARRAY[" + ",".join(f"'{item}'" for item in escaped) + "]"
+
+
+class ArrayFaker(NativeFaker):
+    """Base class for fakers that pick random items from an array."""
+
+    array = []
+
+    def command(self, where):
+        arr = _sql_array(self.array)
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=({arr})[1 + FLOOR(RANDOM() * {len(self.array)})::INT] {where}
+        """
+
+
+class PersonFirstNameFaker(ArrayFaker):
+    name = "Native person_firstname"
+    array = FIRST_NAMES
+
+
+class PersonFamilyNameFaker(ArrayFaker):
+    name = "Native person_familyname"
+    array = FAMILY_NAMES
+
+
+class PersonNameFaker(NativeFaker):
+    name = "Native person_name"
+
+    def command(self, where):
+        first_arr = _sql_array(FIRST_NAMES)
+        last_arr = _sql_array(FAMILY_NAMES)
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            ({first_arr})[1 + FLOOR(RANDOM() * {len(FIRST_NAMES)})::INT],
+            ' ',
+            ({last_arr})[1 + FLOOR(RANDOM() * {len(FAMILY_NAMES)})::INT]
+        ) {where}
+        """
+
+
+class CityFaker(ArrayFaker):
+    name = "Native city"
+    array = CITIES
+
+
+class AddressFaker(NativeFaker):
+    name = "Native address"
+
+    def command(self, where):
+        street_arr = _sql_array(STREET_NAMES)
+        city_arr = _sql_array(CITIES)
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            FLOOR(RANDOM() * 9999 + 1)::INT, ' ',
+            ({street_arr})[1 + FLOOR(RANDOM() * {len(STREET_NAMES)})::INT], ', ',
+            ({city_arr})[1 + FLOOR(RANDOM() * {len(CITIES)})::INT], ' ',
+            LPAD(FLOOR(RANDOM() * 99999)::TEXT, 5, '0')
+        ) {where}
+        """
+
+
+class BusinessNameFaker(NativeFaker):
+    name = "Native business_name"
+
+    def command(self, where):
+        word_arr = _sql_array(BUSINESS_WORDS)
+        suffix_arr = _sql_array(BUSINESS_SUFFIXES)
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            ({word_arr})[1 + FLOOR(RANDOM() * {len(BUSINESS_WORDS)})::INT], ' ',
+            ({suffix_arr})[1 + FLOOR(RANDOM() * {len(BUSINESS_SUFFIXES)})::INT]
+        ) {where}
+        """
+
+
+class UserAgentFaker(ArrayFaker):
+    name = "Native user_agent"
+    array = USER_AGENTS
+
+
+class UrlFaker(NativeFaker):
+    name = "Native url"
+
+    def command(self, where):
+        domains = _sql_array(["example.com", "test.org", "sample.net", "demo.io", "fake.co"])
+        paths = _sql_array(["page", "article", "post", "item", "resource", "content", "data"])
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            'https://',
+            ({domains})[1 + FLOOR(RANDOM() * 5)::INT], '/',
+            ({paths})[1 + FLOOR(RANDOM() * 7)::INT], '/',
+            FLOOR(RANDOM() * 10000)::INT
+        ) {where}
+        """
+
+
+class UrlImageFaker(NativeFaker):
+    name = "Native url_image"
+
+    def command(self, where):
+        domains = _sql_array(["example.com", "images.test.org", "cdn.sample.net"])
+        exts = _sql_array(["jpg", "png", "gif", "webp"])
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            'https://',
+            ({domains})[1 + FLOOR(RANDOM() * 3)::INT], '/img/',
+            SUBSTRING(MD5(RANDOM()::TEXT), 1, 12), '.',
+            ({exts})[1 + FLOOR(RANDOM() * 4)::INT]
+        ) {where}
+        """
+
+
+class FilenameFaker(NativeFaker):
+    name = "Native filename"
+
+    def command(self, where):
+        ext_arr = _sql_array(FILE_EXTENSIONS)
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=CONCAT(
+            SUBSTRING(MD5(RANDOM()::TEXT), 1, 8), '.',
+            ({ext_arr})[1 + FLOOR(RANDOM() * {len(FILE_EXTENSIONS)})::INT]
+        ) {where}
+        """
+
+
+class TextShortFaker(NativeFaker):
+    """Generate a short sentence (5-10 words) from lorem ipsum."""
+
+    name = "Native text_short"
+
+    def command(self, where):
+        words_arr = _sql_array(LOREM_WORDS)
+        n = len(LOREM_WORDS)
+        # Generate 5-10 random words concatenated
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=INITCAP(CONCAT_WS(' ',
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT]
+        )) || '.' {where}
+        """
+
+
+class TextFaker(NativeFaker):
+    """Generate a paragraph (~20 words) from lorem ipsum."""
+
+    name = "Native text"
+
+    def command(self, where):
+        words_arr = _sql_array(LOREM_WORDS)
+        n = len(LOREM_WORDS)
+        # Generate ~20 random words concatenated
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=INITCAP(CONCAT_WS(' ',
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT],
+            ({words_arr})[1 + FLOOR(RANDOM() * {n})::INT]
+        )) || '.' {where}
+        """
+
+
+class SlugFaker(NativeFaker):
+    """Generate a slug from source column or random if no dependency."""
+
+    name = "Native slug"
+    depends = None
+
+    def __init__(self, schema, table, column, args):
+        super().__init__(schema, table, column, args)
+        if args and args[0]:
+            self.depends = args[0]
+
+    def command(self, where):
+        if self.depends:
+            # Slugify the source column: lowercase, remove non-alphanumeric except spaces/hyphens,
+            # replace spaces with hyphens, collapse multiple hyphens
+            return f"""
+            UPDATE {self.schema}.{self.table} SET {self.column}=LOWER(
+                REGEXP_REPLACE(
+                    REGEXP_REPLACE(
+                        REGEXP_REPLACE({self.depends}, '[^a-zA-Z0-9\\s-]', '', 'g'),
+                        '\\s+', '-', 'g'
+                    ),
+                    '-+', '-', 'g'
+                )
+            ) {where}
+            """
+        else:
+            # Random slug using MD5
+            return f"""
+            UPDATE {self.schema}.{self.table} SET {self.column}=LOWER(SUBSTRING(MD5(RANDOM()::TEXT), 1, 15)) {where}
+            """
+
+
+class RandomSlugFaker(NativeFaker):
+    """Generate a random slug (for password, username without dependency)."""
+
+    name = "Native random_slug"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=LOWER(SUBSTRING(MD5(RANDOM()::TEXT), 1, 15)) {where}
+        """
+
+
+class SerialFaker(NativeFaker):
+    """Generate sequential integers using a temporary sequence."""
+
+    name = "Native serial"
+
+    def __init__(self, schema, table, column, args):
+        super().__init__(schema, table, column, args)
+        # Sanitize sequence name (replace dots with underscores)
+        self.seq_name = f"seq_{schema}_{table}_{column}".replace(".", "_")
+        self.start_value = 200000000
+
+    def setup_command(self):
+        """Return command to create the temp sequence."""
+        return f"CREATE TEMP SEQUENCE IF NOT EXISTS {self.seq_name} START {self.start_value}"
+
+    def command(self, where):
+        return f"""
+        UPDATE {self.schema}.{self.table} SET {self.column}=NEXTVAL('{self.seq_name}') {where}
+        """
+
+
 FAKERS = {
-    "person_firstname": generic(FAKER.first_name, "A first name"),
-    "person_familyname": generic(FAKER.last_name, " A family name"),
-    "person_name": generic(FAKER.name),
-    "tla": generic(tla),
-    "business_name": generic(FAKER.company),
-    "slug": slug,
-    "null": generic(lambda **_: None, "Returns NULL"),
-    "text_short": generic(FAKER.sentence),
-    "text": generic(FAKER.paragraph),
+    "person_firstname": PersonFirstNameFaker,
+    "person_familyname": PersonFamilyNameFaker,
+    "person_name": PersonNameFaker,
+    "tla": TlaFaker,
+    "business_name": BusinessNameFaker,
+    "slug": SlugFaker,
+    "null": NullFaker,
+    "text_short": TextShortFaker,
+    "text": TextFaker,
     "email": EmailFaker,
-    "user_agent": generic(FAKER.user_agent),
-    "url": generic(FAKER.uri),
-    "url_image": generic(FAKER.image_url),
-    "phonenumber": generic(FAKER.msisdn),
-    "address": generic(FAKER.address),
-    "city": generic(FAKER.city),
-    "zipcode": generic(FAKER.postcode),
-    "filename": generic(FAKER.file_name),
-    "inet_addr": generic(FAKER.ipv4),
-    "username": slug,
-    "int": lambda **_: random.randint(0, 300000000),  # TODO: arg+default
-    "password": slug,
-    # TODO: arg+default instead?
-    "serial": generic(lambda: None, doc="Imitate a serial"),
+    "user_agent": UserAgentFaker,
+    "url": UrlFaker,
+    "url_image": UrlImageFaker,
+    "phonenumber": PhoneNumberFaker,
+    "address": AddressFaker,
+    "city": CityFaker,
+    "zipcode": ZipcodeFaker,
+    "filename": FilenameFaker,
+    "inet_addr": InetAddrFaker,
+    "username": SlugFaker,
+    "int": IntFaker,
+    "password": RandomSlugFaker,
+    "serial": SerialFaker,
     "static_str": StaticStringFaker,
 }
 
@@ -182,15 +501,12 @@ FAKERS = {
 def get_mapper(
     table_schema, table_name, column_name, data_type, pii_type, args, depends, **_
 ):
-    if pii_type == "serial":
-        return serial(f"{table_schema}.{table_name}.{column_name}", 200000000)
-    else:
-        return FAKERS[pii_type](
-            schema=table_schema,
-            table=table_name,
-            column=column_name,
-            args=args.split(","),
-        )
+    return FAKERS[pii_type](
+        schema=table_schema,
+        table=table_name,
+        column=column_name,
+        args=args.split(",") if args else [],
+    )
 
 
 def get_piis(source_csv):
@@ -247,6 +563,9 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
     pks = [row[0] for row in read_cursor]
     for native in row_mapper.natives:
         print(f"Executing {native}")
+        # Run setup command if the native has one (e.g., create sequence)
+        if hasattr(native, "setup_command"):
+            write_cursor.execute(native.setup_command())
         if keepers:
             where = f"WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})"
             write_cursor.execute(native.command(where), keepers)
@@ -302,11 +621,13 @@ def clean(
     if not keep_filename:
         keep = {}
     else:
-        keep = json.load(open(keep_filename))
+        with open(keep_filename) as f:
+            keep = yaml.safe_load(f)
     if not fixed_filename:
         fixed = {}
     else:
-        fixed = json.load(open(fixed_filename))
+        with open(fixed_filename) as f:
+            fixed = yaml.safe_load(f)
     executor = ThreadPoolExecutor(max_workers=executors)
     tasks = []
     source_csv = open(filename)
@@ -345,6 +666,13 @@ def print_fakers():
     )
 
 
+def migrate_json_to_yaml(json_file):
+    """Convert JSON config file to YAML format."""
+    with open(json_file) as f:
+        data = json.load(f)
+    yaml.dump(data, sys.stdout, default_flow_style=False, allow_unicode=True)
+
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -362,19 +690,29 @@ def main():
     parser.add_argument(
         "--keep",
         type=str,
-        help='JSON file mapping rows to not mask {"schema.table": ["pk1", "pk2"]}',
+        help='YAML file mapping rows to not mask {"schema.table": ["pk1", "pk2"]}',
         default=None,
     )
     parser.add_argument(
         "--fixed",
         type=str,
-        help='JSON file mapping fixed masks: {"schema.table": {"pk1": {"col": "val"}]}',
+        help='YAML file mapping fixed masks: {"schema.table": {"pk1": {"col": "val"}]}',
         default=None,
     )
     parser.add_argument("-e", "--executors", type=int, default=2)
+    parser.add_argument(
+        "--migrate",
+        type=str,
+        metavar="JSON_FILE",
+        help="Convert a JSON config file to YAML (prints to stdout)",
+    )
     args = parser.parse_args()
     if args.list_fakers:
         print_fakers()
+    elif args.migrate:
+        migrate_json_to_yaml(args.migrate)
+    elif not args.filename and not args.dburl:
+        parser.print_help()
     else:
         clean(
             executors=args.executors,

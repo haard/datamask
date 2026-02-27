@@ -25,7 +25,7 @@ datadict 'postgresql://<user>:<password>@<host>/<database>' <schema> -i my_exist
 ```
 
 ## Status
-Stable, supports postgresql and sqlite3.
+Stable, supports postgresql.
 Consists of 45% todo's and hacks - still works.
 
 
