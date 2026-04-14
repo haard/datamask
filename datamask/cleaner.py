@@ -5,61 +5,30 @@ import logging
 import sys
 
 import yaml
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig()
 LOG = logging.getLogger(__name__)
 
 
-FieldMapSpec = namedtuple("FieldMapSpec", "col spec mapper")
-
-
 class RowMapper:
     def __init__(self, table, piis_for_table):
-        """Sort column mappers according to dependencies (including native fakers)"""
-        self.mappers = []
+        """Sort native fakers according to dependencies."""
         self.natives = []
         remaining = dict(piis_for_table.items())
         added = set()
         count = len(remaining)
         while remaining:
             for col, (spec, mapper) in list(remaining.items()):
-                if isinstance(mapper, NativeFaker):
-                    # Check if this native has dependencies
-                    native_depends = getattr(mapper, "depends", None)
-                    if native_depends and native_depends not in added:
-                        continue  # Wait for dependency to be added first
-                    self.natives.append(mapper)
-                    added.add(col)
-                    del remaining[col]
+                native_depends = getattr(mapper, "depends", None)
+                if native_depends and native_depends not in added:
                     continue
-                if spec["depends"]:
-                    depends = [d for d in spec["depends"].split(",") if d]
-                else:
-                    depends = None
-                if not depends or all([dep in added for dep in depends]):
-                    self.mappers.append(FieldMapSpec(col, spec, mapper))
-                    added.add(col)
-                    del remaining[col]
+                self.natives.append(mapper)
+                added.add(col)
+                del remaining[col]
             assert len(remaining) < count, f"Circular dependency detected: {remaining.keys()}"
             count = len(remaining)
-
-    def mask(self, row):
-        for mapspec in self.mappers:
-            try:
-                data = mapspec.mapper(row[mapspec.col], row)
-                row[mapspec.col] = data
-            except Exception as exe:
-                print(
-                    f"Failed at col {mapspec.col} using mapper {mapspec.mapper} with {exe}"
-                )
-                raise
-        for i, col in enumerate(row):
-            if isinstance(col, (list, dict)):
-                row[i] = json.dumps(row[i])
-
-        return row
 
 
 class NativeFaker:
@@ -144,7 +113,7 @@ class InetAddrFaker(NativeFaker):
             FLOOR(RANDOM() * 256)::INT, '.',
             FLOOR(RANDOM() * 256)::INT, '.',
             FLOOR(RANDOM() * 256)::INT
-        ) {where}
+        )::inet {where}
         """
 
 
@@ -528,79 +497,47 @@ def get_piis(source_csv):
 def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
 
     row_mapper = RowMapper(table, pii_spec)
-    if not row_mapper.mappers and not row_mapper.natives:
+    if not row_mapper.natives:
         print(f"Skipping {table}")
         return
     print(f"Executing {table}")
     if dsn.startswith("postgres"):
         import psycopg2
-        import psycopg2.extras
 
         conn = psycopg2.connect(dsn)
-        read_cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        read_cursor.execute(
-            f"""SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS data_type
+        cur = conn.cursor()
+        cur.execute("SET CONSTRAINTS ALL DEFERRED")
+        cur.execute(
+            f"""SELECT a.attname
                             FROM   pg_index i
                             JOIN   pg_attribute a ON a.attrelid = i.indrelid
                                                  AND a.attnum = ANY(i.indkey)
                             WHERE  i.indrelid = '{table}'::regclass
                             AND    i.indisprimary;"""
         )
-        write_cursor = conn.cursor()
-        write_cursor.execute("SET CONSTRAINTS ALL DEFERRED")
         p = "%s"
     else:
         import sqlite3
 
         conn = sqlite3.connect(dsn)
-        conn.row_factory = sqlite3.Row
-        read_cursor = conn.cursor()
-        read_cursor.execute(
+        cur = conn.cursor()
+        cur.execute(
             "SELECT name from pragma_table_info(?) WHERE pk=1", (table.split(".")[1],)
         )
-        write_cursor = conn.cursor()
         p = "?"
-    pks = [row[0] for row in read_cursor]
+    pks = [row[0] for row in cur]
     for native in row_mapper.natives:
         print(f"Executing {native}")
         # Run setup command if the native has one (e.g., create sequence)
         if hasattr(native, "setup_command"):
-            write_cursor.execute(native.setup_command())
+            cur.execute(native.setup_command())
         if keepers:
             where = f"WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})"
-            write_cursor.execute(native.command(where), keepers)
+            cur.execute(native.command(where), keepers)
         else:
-            write_cursor.execute(native.command(""))
+            cur.execute(native.command(""))
 
-    if keepers is None:
-        read_cursor.execute(f"SELECT * FROM {table}")
-    else:
-        print(f"Skipping {len(keepers)} records for {table}")
-        read_cursor.execute(
-            f"SELECT * FROM {table} WHERE {pks[0]} NOT IN ({','.join([p]*len(keepers))})",
-            keepers,
-        )
     where = " AND ".join((f"{colname}={p}") for colname in pks)
-    for row in read_cursor:
-        try:
-
-            new_row = row_mapper.mask({k: row[k] for k in row.keys()})
-        except Exception as exe:
-            print(f"{table} Failure ({exe}):\n\t{row}\n\t{pii_spec}")
-            raise
-        replacements = ",".join((f'"{colname}"={p}') for colname in new_row.keys())
-        new_values = [new_row[k] for k in new_row.keys()]
-        old_values = [row[k] for k in pks]
-        sql = f"UPDATE {table} SET {replacements} WHERE {where}"
-        values = new_values + old_values
-        try:
-            write_cursor.execute(sql, values)
-            assert write_cursor.rowcount == 1
-        except Exception:
-            LOG.exception(
-                f"Table: {table}\n SQL: {sql} \n Values: {values}\n Spec: {pii_spec}"
-            )
-            raise
     if fixed:
         for pk, kv in fixed.items():
             update_sql = []
@@ -608,7 +545,7 @@ def mask_pii(table: str, pii_spec, dsn, keepers, fixed):
             for col, val in kv.items():
                 update_sql.append(f"{col}={p}")
                 vals.append(val)
-            write_cursor.execute(
+            cur.execute(
                 f"UPDATE {table} SET {','.join(update_sql)} WHERE {where}", vals + [pk]
             )
     conn.commit()
